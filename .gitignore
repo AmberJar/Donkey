@@ -1,0 +1,30 @@
+# Training outputs and experiment tracking
+checkpoints/
+wandb/
+log/
+logs/
+*.pt
+*.pth
+**/weights/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Jupyter notebook checkpoints
+.ipynb_checkpoints/
+
+# VSCode settings
+.vscode/
+
+# Log files
+*.log
+
+# Environment files
+.env/
+*.env
+.venv/
+*.egg-info/
+
