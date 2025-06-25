@@ -1,38 +1,49 @@
 import os
-import cv2
+import sys
+
+# 获取当前文件的父目录
+current_dir = os.path.dirname(os.path.abspath(__file__))
+parent_dir = os.path.abspath(os.path.join(current_dir, ".."))  # embedding 的上一级
+
+# 添加到 sys.path
+if parent_dir not in sys.path:
+    sys.path.insert(0, parent_dir)
 import numpy as np
+import cv2
+import torch
+import torch.nn.functional as F
 from pathlib import Path
+from PIL import Image
+from torchvision import transforms as T
 from skimage import transform as trans
-
-# ArcFace 标准五点位置（用于可选替代）
-arcface_template = np.array([
-    [38.2946, 51.6963],
-    [73.5318, 51.5014],
-    [56.0252, 71.7366],
-    [41.5493, 92.3655],
-    [70.7299, 92.2041]
-], dtype=np.float32)
+from insightface.recognition.arcface_torch.backbones import get_model
+from tqdm import tqdm
 
 
-def parse_line(line):
-    """解析检测框 + 5个关键点"""
-    nums = list(map(float, line.strip().split()))
-    if len(nums) != 20:
-        return None, None
-    x1, y1, w, h = nums[0], nums[1], nums[2], nums[3]
-    bbox = [x1, y1, w, h]
+def parse_retinaface_line(line):
+    parts = line.strip().split()
+    if len(parts) != 21:
+        return None, None, None
+
+    filename = parts[0]
+    x1, y1 = float(parts[1]), float(parts[2])
+    w, h = float(parts[3]), float(parts[4])
+    x2, y2 = x1 + w, y1 + h
+
+    bbox = [int(max(0, x1)), int(max(0, y1)), int(x2), int(y2)]
+
     landmarks = np.array([
-        [nums[4], nums[5]],
-        [nums[7], nums[8]],
-        [nums[10], nums[11]],
-        [nums[13], nums[14]],
-        [nums[16], nums[17]],
+        [float(parts[5]), float(parts[6])],
+        [float(parts[8]), float(parts[9])],
+        [float(parts[11]), float(parts[12])],
+        [float(parts[14]), float(parts[15])],
+        [float(parts[17]), float(parts[18])],
     ], dtype=np.float32)
-    return bbox, landmarks
+
+    return filename, bbox, landmarks
 
 
 def get_dynamic_template(landmarks, output_size=(112, 112), scale=1.2):
-    """生成自适应对齐模板"""
     center = np.mean(landmarks, axis=0)
     landmarks_centered = landmarks - center
     max_dist = np.max(np.linalg.norm(landmarks_centered, axis=1))
@@ -40,98 +51,79 @@ def get_dynamic_template(landmarks, output_size=(112, 112), scale=1.2):
     return scaled
 
 
-def align_face(face_img, landmarks, image_size=(112, 112)):
-    dst = get_dynamic_template(landmarks, output_size=image_size)
+def align_face(img, bbox, landmarks, image_size=(112, 112)):
+    x1, y1, x2, y2 = bbox
+    face = img[y1:y2, x1:x2]
+    if face.shape[0] == 0 or face.shape[1] == 0:
+        return None
+
+    landmarks_local = landmarks - np.array([x1, y1], dtype=np.float32)
+    dst = get_dynamic_template(landmarks_local, output_size=image_size)
     tform = trans.SimilarityTransform()
-    tform.estimate(landmarks, dst)
+    tform.estimate(landmarks_local, dst)
     M = tform.params[0:2, :]
-    aligned = cv2.warpAffine(face_img, M, image_size, borderValue=0.0)
+    aligned = cv2.warpAffine(face, M, image_size, borderValue=0.0)
+
     return aligned
 
 
-def extract_label_key(filename):
-    return filename.rsplit("_", 1)[0]
+def extract_label(filename):
+    return "_".join(Path(filename).stem.split("_")[:-1])
 
 
-def process_dataset(txt_path, img_folder, output_root, label_output_path):
-    img_folder = Path(img_folder)
-    output_root = Path(output_root)
-    output_root.mkdir(parents=True, exist_ok=True)
+def build_feature_library(images_dir, txt_file, save_path, model_ckpt, device="cuda"):
+    model = get_model('r100', fp16=False).to(device)
+    model.load_state_dict(torch.load(model_ckpt))
+    model.eval()
 
-    label_file = open(label_output_path, "w")
-    with open(txt_path, "r") as f:
+    transform = T.Compose([
+        T.ToTensor(),
+        T.Normalize(mean=[0.5]*3, std=[0.5]*3),
+    ])
+
+    features = []
+    labels = []
+
+    with open(txt_file, 'r') as f:
         lines = f.readlines()
 
-    i = 0
-    while i < len(lines):
-        line = lines[i].strip()
+    for line in tqdm(lines, desc="Building feature library"):
+        filename, bbox, landmarks = parse_retinaface_line(line)
+        if filename is None:
+            continue
 
-        if line.startswith("#"):
-            filename = line[1:].strip()
-            class_key = extract_label_key(filename)
+        img_path = Path(images_dir) / filename
+        if not img_path.exists():
+            continue
 
-            # 检查是否只有一个检测框（跳过多个）
-            j = i + 1
-            valid_lines = []
-            while j < len(lines) and not lines[j].strip().startswith("#"):
-                if lines[j].strip():
-                    valid_lines.append(lines[j])
-                j += 1
+        img = cv2.imread(str(img_path))
+        if img is None:
+            continue
 
-            if len(valid_lines) != 1:
-                i = j
-                continue
+        aligned = align_face(img, bbox, landmarks)
+        if aligned is None:
+            continue
 
-            bbox, landmarks = parse_line(valid_lines[0])
-            if bbox is None or landmarks is None:
-                i = j
-                continue
+        image = Image.fromarray(aligned)
+        image_tensor = transform(image).unsqueeze(0).to(device)
 
-            img_path = img_folder / filename
-            if not img_path.exists():
-                print(f"❌ 找不到图像: {img_path}")
-                i = j
-                continue
+        with torch.no_grad():
+            feat = model(image_tensor)
+            feat = F.normalize(feat, p=2, dim=1)
 
-            img = cv2.imread(str(img_path))
-            if img is None:
-                print(f"❌ 图像读取失败: {img_path}")
-                i = j
-                continue
+        features.append(feat.cpu().numpy())
+        labels.append(extract_label(filename))
 
-            x1, y1, w, h = bbox
-            x2, y2 = int(x1 + w), int(y1 + h)
-            x1, y1 = int(max(0, x1)), int(max(0, y1))
-            x2, y2 = min(x2, img.shape[1]), min(y2, img.shape[0])
-            cropped = img[y1:y2, x1:x2]
-
-            if cropped.shape[0] < 20 or cropped.shape[1] < 20:
-                print(f"⚠️ 裁剪尺寸异常: {filename}")
-                i = j
-                continue
-
-            landmarks -= np.array([x1, y1], dtype=np.float32)
-            aligned = align_face(cropped, landmarks)
-
-            class_dir = output_root / class_key
-            class_dir.mkdir(parents=True, exist_ok=True)
-            save_path = class_dir / filename
-            cv2.imwrite(str(save_path), aligned)
-            label_file.write(f"{save_path} {class_key}\n")
-
-            i = j
-        else:
-            i += 1
-
-    label_file.close()
-    print(f"✅ 处理完成。图像保存在 {output_root}，标签写入 {label_output_path}")
+    features = np.vstack(features)
+    print(f"[INFO] Saving {len(labels)} embeddings to {save_path}")
+    os.makedirs(os.path.dirname(save_path), exist_ok=True)
+    np.savez(save_path, features=features, labels=labels)
 
 
-# ========== 脚本入口 ==========
 if __name__ == "__main__":
-    txt_path = "/scratch/pf2m24/data/Donkey_xiabao_face/label.txt"
-    img_folder = "/scratch/pf2m24/data/Donkey_xiabao_face/images"
-    output_root = "/scratch/pf2m24/data/Donkey_xiabao_face/arcface_trainset"
-    label_output_path = "/scratch/pf2m24/data/Donkey_xiabao_face/arcface_label.txt"
+    images_dir = "/scratch/pf2m24/data/Donkey_xiabao_face/images"
+    txt_file = "/scratch/pf2m24/data/Donkey_xiabao_face/train_annotations.txt"
+    save_path = "./output_features/features_and_labels_face_train.npz"
+    model_ckpt = "/scratch/pf2m24/projects/donkey_place/insightface/recognition/arcface_torch/work_dirs/donkey/model.pt"
 
-    process_dataset(txt_path, img_folder, output_root, label_output_path)
+    build_feature_library(images_dir, txt_file, save_path, model_ckpt)
