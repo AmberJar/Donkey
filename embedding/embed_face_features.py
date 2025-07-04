@@ -115,7 +115,7 @@ def build_feature_library(images_dir, txt_dir, save_path, selected_list=None, de
 if __name__ == "__main__":
     images_dir = "/scratch/pf2m24/data/Donkey_xiabao_face/images"
     txt_dir = "/scratch/pf2m24/data/Donkey_xiabao_face/donkey_face_yolo_one"
-    save_path = "./output_features/features_and_labels_face.npz"
-    selected_list = "/scratch/pf2m24/data/Donkey_xiabao_face/train_annotations.txt"
+    save_path = "./output_features/features_and_labels_body.npz"
+    selected_list = "/scratch/pf2m24/data/Donkey_xiabao_face/embedding.txt"
 
     build_feature_library(images_dir, txt_dir, save_path, selected_list=selected_list)

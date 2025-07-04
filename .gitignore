@@ -5,6 +5,8 @@ log/
 logs/
 *.pt
 *.pth
+*.log
+**/tensorboard/
 **/weights/
 
 # Python cache

@@ -22,24 +22,30 @@ from tqdm import tqdm
 
 def parse_retinaface_line(line):
     parts = line.strip().split()
-    if len(parts) != 21:
-        return None, None, None
 
-    filename = parts[0]
-    x1, y1 = float(parts[1]), float(parts[2])
-    w, h = float(parts[3]), float(parts[4])
+    # 动态确定 filename 部分有多少 token
+    for i in range(1, len(parts)):
+        maybe_numbers = parts[i:]
+        if len(maybe_numbers) == 20 and all(p.replace('.', '', 1).replace('-', '', 1).isdigit() for p in maybe_numbers):
+            filename = ' '.join(parts[:i])
+            num_values = maybe_numbers
+            break
+    else:
+        raise ValueError(f"Line format error: cannot locate 20 float fields in: {line}")
+
+    assert len(num_values) == 20, f"Expected 20 float values, got {len(num_values)} → {line}"
+
+    x1, y1 = float(num_values[0]), float(num_values[1])
+    w, h = float(num_values[2]), float(num_values[3])
     x2, y2 = x1 + w, y1 + h
-
-    # 裁剪框
     bbox = [int(max(0, x1)), int(max(0, y1)), int(x2), int(y2)]
 
-    # 5个关键点
     landmarks = np.array([
-        [float(parts[5]), float(parts[6])],
-        [float(parts[8]), float(parts[9])],
-        [float(parts[11]), float(parts[12])],
-        [float(parts[14]), float(parts[15])],
-        [float(parts[17]), float(parts[18])],
+        [float(num_values[4]), float(num_values[5])],
+        [float(num_values[7]), float(num_values[8])],
+        [float(num_values[10]), float(num_values[11])],
+        [float(num_values[13]), float(num_values[14])],
+        [float(num_values[16]), float(num_values[17])],
     ], dtype=np.float32)
 
     return filename, bbox, landmarks
@@ -77,7 +83,7 @@ def extract_gt_label(filename):
 
 def evaluate(images_dir, txt_file, feature_file, model_ckpt, device="cuda"):
     # 初始化模型
-    model = get_model('r100', fp16=False).to(device)
+    model = get_model('vit_b', fp16=False).to(device)
     model.load_state_dict(torch.load(model_ckpt))
     model.eval()
 
@@ -141,8 +147,8 @@ def evaluate(images_dir, txt_file, feature_file, model_ckpt, device="cuda"):
 
 if __name__ == "__main__":
     images_dir = "/scratch/pf2m24/data/Donkey_xiabao_face/images"
-    txt_file = "/scratch/pf2m24/data/Donkey_xiabao_face/train_annotations.txt"
-    feature_file = "./output_features/features_and_labels_face_train.npz"
-    model_ckpt = "/scratch/pf2m24/projects/donkey_place/insightface/recognition/arcface_torch/work_dirs/donkey/model.pt"
+    txt_file = "/scratch/pf2m24/data/Donkey_xiabao_face/val_annotations.txt"
+    feature_file = "./output_features/features_and_labels_face_train_vitb.npz"
+    model_ckpt = "/scratch/pf2m24/projects/donkey_place/insightface/recognition/arcface_torch/work_dirs/donkey_vit_b/model.pt"
 
     evaluate(images_dir, txt_file, feature_file, model_ckpt, device="cuda" if torch.cuda.is_available() else "cpu")
